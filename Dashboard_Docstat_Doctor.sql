@@ -1,8 +1,99 @@
-SELECT * FROM reporting_batch.cc_agent_efficiency ORDER BY task_date DESC LIMIT 10;
 
-SELECT * FROM reporting_batch.cc_agent_man_hour ORDER BY task_date DESC LIMIT 10;
+---- Latest Utilization
 
-SELECT * FROM reporting_batch.cc_agent_task_base_count ORDER BY task_date DESC LIMIT 10;
+WITH doc AS ( 
+		SELECT d.doctor_profile_id, MAX(INITCAP(d.name)) AS doctor_name, MIN(DATE(c.completion_time)) AS doctor_joining_date
+	    FROM pe_docstat_91streets_media_technologies."case" c 
+	    LEFT JOIN pe_docstat_91streets_media_technologies.doctor d ON d.id=c.doctor_id
+	    WHERE c.current_status_id=5
+	    GROUP BY 1
+), 
+profile_blocked AS (
+	SELECT sh1.*, MIN(created_at) AS profile_accepted_at
+	FROM (
+		  SELECT doctor_id, created_at AS profile_blocked_at
+		  FROM pe_docstat_91streets_media_technologies.status_history
+		  WHERE new_status_id!=4
+		  GROUP BY 1,2
+	) sh1
+	LEFT JOIN pe_docstat_91streets_media_technologies.status_history sh2 ON sh1.doctor_id=sh2.doctor_id AND sh2.new_status_id=4 AND sh1.profile_blocked_at<=sh2.created_at
+	GROUP BY 1,2
+),
+approved_online AS (  
+	 SELECT dsc.doctor_id, dsc.online_start AS online_start_time, dsc.online_minutes*60 AS online_seconds, dsc.online_end AS online_end_time
+	 FROM pe_docstat_91streets_media_technologies.doctor_status_change dsc
+	 LEFT JOIN profile_blocked pb ON dsc.doctor_id=pb.doctor_id AND ((online_start>=pb.profile_blocked_at) AND (online_end<=pb.profile_accepted_at OR pb.profile_accepted_at IS NULL))--online_start>=p.profile_accepted_at AND (p.profile_blocked_at IS NULL OR dsc.online_end<=p.profile_blocked_at)
+	 WHERE pb.doctor_id IS NULL
+	 GROUP BY 1,2,3,4
+)
+SELECT finale.*,
+  --finale.doctor_id, finale.online_start AS online_start_time, dsc.online_minutes*60 AS online_seconds, finale.online_end AS online_end_time
+  CASE WHEN finale.last_task_detached_at>=finale.online_end_time 
+    THEN finale.last_task_detached_at
+    ELSE finale.online_end_time 
+  END AS actual_online_end_time,
+  CASE WHEN finale.last_task_detached_at>=finale.online_end_time
+    THEN DATEDIFF(second,online_start_time,finale.last_task_detached_at)
+    ELSE DATEDIFF(second,online_start_time,finale.online_end_time)
+  END AS actual_seconds_online
+--  SUM(idle_time_secs) AS total_idle_secs,
+--  COUNT(CASE WHEN idle_time_secs!=0 THEN idle_time_secs END) AS total_idle_instances
+FROM (
+	SELECT t.doctor_profile_id,
+		   doc.doctor_name, 
+		   doc.doctor_joining_date,
+		   CASE WHEN DATEDIFF(day,doc.doctor_joining_date,DATE(t.task_assigned_at))>=30 THEN 'Old' ELSE 'New' END AS doctor_type,
+		   online_start_time, online_seconds, online_end_time,
+		   COUNT(task_id) AS total_tasks,
+		   COUNT(CASE WHEN task_action='Rx Prescribed' THEN task_id END) AS tasks_prescribed,
+		   COUNT(CASE WHEN task_action='Hold' THEN task_id END) AS tasks_putonhold,
+		   COUNT(CASE WHEN task_action='Rescheduled' THEN task_id END) AS tasks_rescheduled,
+		   COUNT(CASE WHEN task_action='Reassigned To Admin' THEN task_id END) AS tasks_reassigned,
+		   COUNT(CASE WHEN task_action='Doctor Rejected' THEN task_id END) AS tasks_rejected,
+		   COUNT(CASE WHEN task_action='Hold' AND call_attempts=0 THEN task_id END) AS tasks_putonhold_withoutcalling,
+		   COUNT(CASE WHEN task_type='New' THEN task_id END) AS total_new_tasks,
+		   COUNT(CASE WHEN task_type='Hold' THEN task_id END) AS total_hold_tasks,
+		--   COUNT(CASE WHEN task_type='Rescheduled' THEN task_id END) AS total_rescheduled_tasks,
+		--   COUNT(CASE WHEN task_type='ScheduleNow' THEN task_id END) AS total_schedulenow_tasks,
+		--   COUNT(CASE WHEN task_type='Slotted' THEN task_id END) AS total_slotted_tasks,
+		   MIN(task_assigned_at) AS first_task_assigned_at,
+		--   MAX(task_assigned_at) AS last_task_assigned_at,
+		--   MAX(task_actioned_at) AS last_task_actioned_at, 
+		   MAX(task_detached_at) AS last_task_detached_at, 
+		--   SUM(call_attempts) AS total_call_attempts,
+		--   SUM(calls_connected) AS total_calls_connected,
+		--   SUM(calls_disconnected) AS total_calls_disconnected,
+		   SUM(doctor_inactive_flag) AS tasks_inactive,
+		   SUM(doctor_notified_count) AS total_notified_count,
+		   SUM(issue_task_flag) AS total_issue_tasks,
+		--   COUNT(CASE WHEN min_call_initiated_at IS NOT NULL THEN task_id END) AS tasks_called,
+		   COUNT(CASE WHEN min_call_initiated_at<max_call_disconnected_at THEN task_id END) AS tasks_disconnected,
+		   COUNT(CASE WHEN task_actioned_at IS NOT NULL THEN task_id END) AS tasks_actioned,
+		   COUNT(CASE WHEN min_call_initiated_at<max_call_disconnected_at AND task_action='Rx Prescribed' THEN task_id END) AS tasks_rx_disconnected,
+		--   COUNT(CASE WHEN task_action='Rx Prescribed' THEN task_id END) AS tasks_rx_actioned,
+		   SUM(DATEDIFF(second,task_assigned_at,min_call_initiated_at)) AS time_to_call,
+		   SUM(DATEDIFF(second,min_call_initiated_at, max_call_disconnected_at)) AS total_call_duration,
+		   SUM(DATEDIFF(second,max_call_disconnected_at,task_actioned_at)) AS total_time_to_action,
+		   SUM(DATEDIFF(second,task_assigned_at,task_actioned_at)) AS total_case_handling_time,
+		   SUM(CASE WHEN task_action='Rx Prescribed' THEN DATEDIFF(second,min_call_initiated_at, max_call_disconnected_at) END) AS total_rx_call_duration,
+		   SUM(CASE WHEN task_action='Rx Prescribed' THEN DATEDIFF(second,max_call_disconnected_at,task_actioned_at) END) AS total_rx_time_to_action,
+		   SUM(CASE WHEN task_action='Rx Prescribed' THEN DATEDIFF(second,task_assigned_at,task_actioned_at) END) AS total_rx_case_handling_time,
+		   SUM(DATEDIFF(second,task_assigned_at,task_detached_at)) AS total_case_attachment_time,
+		   SUM(CASE WHEN doctor_inactive_flag=1 THEN DATEDIFF(second,task_assigned_at,task_detached_at) END) AS total_inactive_case_attachment_time
+	FROM approved_online ao 
+	LEFT JOIN data_model.f_docstat_task t ON ao.doctor_id=t.doctor_id AND t.task_assigned_at BETWEEN ao.online_start_time AND ao.online_end_time
+	LEFT JOIN doc ON t.doctor_profile_id=doc.doctor_profile_id
+	WHERE DATE(ao.online_start_time)>='2019-11-01' AND
+			DATE(ao.online_start_time) >= (CASE WHEN (EXTRACT(MONTH FROM CURRENT_DATE)-6)<=0 
+									 THEN ((EXTRACT(YEAR FROM CURRENT_DATE)-1)||'-'||(EXTRACT(MONTH FROM CURRENT_DATE)+6)||'-'||'01')::DATE 
+									 ELSE (EXTRACT(YEAR FROM CURRENT_DATE)||'-'||(EXTRACT(MONTH FROM CURRENT_DATE)-6)||'-'||'01')::DATE
+								END)
+			AND (task_action IS NOT NULL OR doctor_inactive_flag=1)
+	GROUP BY 1,2,3,4,5,6,7
+) finale
+--LEFT JOIN pe_docstat_91streets_media_technologies.doctor_idle_time dit ON finale.doctor_id=dit.doctor_id AND dit.start_time BETWEEN finale.online_start_time AND finale.online_end_time
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35;
+		       
 
 
 --- Old Efficiency
@@ -165,104 +256,6 @@ WHERE (fdt1.task_action IN ('Rx Prescribed','Hold','Rescheduled','Doctor Rejecte
 								END)
 GROUP BY 1,2,3,4,5,6,7,8,9
 ORDER BY 5,6,10 DESC;
-
-
-
-
----- Latest Utilization
-
-WITH doc AS ( 
-		SELECT d.doctor_profile_id, MAX(INITCAP(d.name)) AS doctor_name, MIN(DATE(c.completion_time)) AS doctor_joining_date
-	    FROM pe_docstat_91streets_media_technologies."case" c 
-	    LEFT JOIN pe_docstat_91streets_media_technologies.doctor d ON d.id=c.doctor_id
-	    WHERE c.current_status_id=5
-	    GROUP BY 1
-), 
-profile_blocked AS (
-	SELECT sh1.*, MIN(created_at) AS profile_accepted_at
-	FROM (
-		  SELECT doctor_id, created_at AS profile_blocked_at
-		  FROM pe_docstat_91streets_media_technologies.status_history
-		  WHERE new_status_id!=4
-		  GROUP BY 1,2
-	) sh1
-	LEFT JOIN pe_docstat_91streets_media_technologies.status_history sh2 ON sh1.doctor_id=sh2.doctor_id AND sh2.new_status_id=4 AND sh1.profile_blocked_at<=sh2.created_at
-	GROUP BY 1,2
-),
-approved_online AS (  
-	 SELECT dsc.doctor_id, dsc.online_start AS online_start_time, dsc.online_minutes*60 AS online_seconds, dsc.online_end AS online_end_time
-	 FROM pe_docstat_91streets_media_technologies.doctor_status_change dsc
-	 LEFT JOIN profile_blocked pb ON dsc.doctor_id=pb.doctor_id AND ((online_start>=pb.profile_blocked_at) AND (online_end<=pb.profile_accepted_at OR pb.profile_accepted_at IS NULL))--online_start>=p.profile_accepted_at AND (p.profile_blocked_at IS NULL OR dsc.online_end<=p.profile_blocked_at)
-	 WHERE pb.doctor_id IS NULL
-	 GROUP BY 1,2,3,4
-)
-SELECT finale.*,
-  --finale.doctor_id, finale.online_start AS online_start_time, dsc.online_minutes*60 AS online_seconds, finale.online_end AS online_end_time
-  CASE WHEN finale.last_task_detached_at>=finale.online_end_time 
-    THEN finale.last_task_detached_at
-    ELSE finale.online_end_time 
-  END AS actual_online_end_time,
-  CASE WHEN finale.last_task_detached_at>=finale.online_end_time
-    THEN DATEDIFF(second,online_start_time,finale.last_task_detached_at)
-    ELSE DATEDIFF(second,online_start_time,finale.online_end_time)
-  END AS actual_seconds_online
---  SUM(idle_time_secs) AS total_idle_secs,
---  COUNT(CASE WHEN idle_time_secs!=0 THEN idle_time_secs END) AS total_idle_instances
-FROM (
-	SELECT t.doctor_profile_id,
-		   doc.doctor_name, 
-		   doc.doctor_joining_date,
-		   CASE WHEN DATEDIFF(day,doc.doctor_joining_date,DATE(t.task_assigned_at))>=30 THEN 'Old' ELSE 'New' END AS doctor_type,
-		   online_start_time, online_seconds, online_end_time,
-		   COUNT(task_id) AS total_tasks,
-		   COUNT(CASE WHEN task_action='Rx Prescribed' THEN task_id END) AS tasks_prescribed,
-		   COUNT(CASE WHEN task_action='Hold' THEN task_id END) AS tasks_putonhold,
-		   COUNT(CASE WHEN task_action='Rescheduled' THEN task_id END) AS tasks_rescheduled,
-		   COUNT(CASE WHEN task_action='Reassigned To Admin' THEN task_id END) AS tasks_reassigned,
-		   COUNT(CASE WHEN task_action='Doctor Rejected' THEN task_id END) AS tasks_rejected,
-		   COUNT(CASE WHEN task_action='Hold' AND call_attempts=0 THEN task_id END) AS tasks_putonhold_withoutcalling,
-		   COUNT(CASE WHEN task_type='New' THEN task_id END) AS total_new_tasks,
-		   COUNT(CASE WHEN task_type='Hold' THEN task_id END) AS total_hold_tasks,
-		--   COUNT(CASE WHEN task_type='Rescheduled' THEN task_id END) AS total_rescheduled_tasks,
-		--   COUNT(CASE WHEN task_type='ScheduleNow' THEN task_id END) AS total_schedulenow_tasks,
-		--   COUNT(CASE WHEN task_type='Slotted' THEN task_id END) AS total_slotted_tasks,
-		   MIN(task_assigned_at) AS first_task_assigned_at,
-		--   MAX(task_assigned_at) AS last_task_assigned_at,
-		--   MAX(task_actioned_at) AS last_task_actioned_at, 
-		   MAX(task_detached_at) AS last_task_detached_at, 
-		--   SUM(call_attempts) AS total_call_attempts,
-		--   SUM(calls_connected) AS total_calls_connected,
-		--   SUM(calls_disconnected) AS total_calls_disconnected,
-		   SUM(doctor_inactive_flag) AS tasks_inactive,
-		   SUM(doctor_notified_count) AS total_notified_count,
-		   SUM(issue_task_flag) AS total_issue_tasks,
-		--   COUNT(CASE WHEN min_call_initiated_at IS NOT NULL THEN task_id END) AS tasks_called,
-		   COUNT(CASE WHEN min_call_initiated_at<max_call_disconnected_at THEN task_id END) AS tasks_disconnected,
-		   COUNT(CASE WHEN task_actioned_at IS NOT NULL THEN task_id END) AS tasks_actioned,
-		   COUNT(CASE WHEN min_call_initiated_at<max_call_disconnected_at AND task_action='Rx Prescribed' THEN task_id END) AS tasks_rx_disconnected,
-		--   COUNT(CASE WHEN task_action='Rx Prescribed' THEN task_id END) AS tasks_rx_actioned,
-		   SUM(DATEDIFF(second,task_assigned_at,min_call_initiated_at)) AS time_to_call,
-		   SUM(DATEDIFF(second,min_call_initiated_at, max_call_disconnected_at)) AS total_call_duration,
-		   SUM(DATEDIFF(second,max_call_disconnected_at,task_actioned_at)) AS total_time_to_action,
-		   SUM(DATEDIFF(second,task_assigned_at,task_actioned_at)) AS total_case_handling_time,
-		   SUM(CASE WHEN task_action='Rx Prescribed' THEN DATEDIFF(second,min_call_initiated_at, max_call_disconnected_at) END) AS total_rx_call_duration,
-		   SUM(CASE WHEN task_action='Rx Prescribed' THEN DATEDIFF(second,max_call_disconnected_at,task_actioned_at) END) AS total_rx_time_to_action,
-		   SUM(CASE WHEN task_action='Rx Prescribed' THEN DATEDIFF(second,task_assigned_at,task_actioned_at) END) AS total_rx_case_handling_time,
-		   SUM(DATEDIFF(second,task_assigned_at,task_detached_at)) AS total_case_attachment_time,
-		   SUM(CASE WHEN doctor_inactive_flag=1 THEN DATEDIFF(second,task_assigned_at,task_detached_at) END) AS total_inactive_case_attachment_time
-	FROM approved_online ao 
-	LEFT JOIN data_model.f_docstat_task t ON ao.doctor_id=t.doctor_id AND t.task_assigned_at BETWEEN ao.online_start_time AND ao.online_end_time
-	LEFT JOIN doc ON t.doctor_profile_id=doc.doctor_profile_id
-	WHERE DATE(ao.online_start_time)>='2019-11-01' AND
-			DATE(ao.online_start_time) >= (CASE WHEN (EXTRACT(MONTH FROM CURRENT_DATE)-6)<=0 
-									 THEN ((EXTRACT(YEAR FROM CURRENT_DATE)-1)||'-'||(EXTRACT(MONTH FROM CURRENT_DATE)+6)||'-'||'01')::DATE 
-									 ELSE (EXTRACT(YEAR FROM CURRENT_DATE)||'-'||(EXTRACT(MONTH FROM CURRENT_DATE)-6)||'-'||'01')::DATE
-								END)
-			AND (task_action IS NOT NULL OR doctor_inactive_flag=1)
-	GROUP BY 1,2,3,4,5,6,7
-) finale
---LEFT JOIN pe_docstat_91streets_media_technologies.doctor_idle_time dit ON finale.doctor_id=dit.doctor_id AND dit.start_time BETWEEN finale.online_start_time AND finale.online_end_time
-GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35;
 
 
 
