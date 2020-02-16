@@ -1,2 +1,2 @@
 # ProfessionalWork
-A collation of my work in Consumer Analytics
+A collation of some of my work in Consumer Analytics
