@@ -45,9 +45,9 @@ HAVING MIN(DATE(created_at))>='2019-11-01' --BETWEEN CURRENT_DATE-2 AND CURRENT_
 
 INSERT INTO data_model.f_docstat_task (
 WITH action_benchmarks AS (
-	SELECT 'Rx Prescribed' AS task_action, 150 AS benchmark
+	SELECT 'Rx Prescribed' AS task_action, 180 AS benchmark
 	UNION
-	SELECT 'Hold' AS task_action, 75 AS benchmark
+	SELECT 'Hold' AS task_action, 60 AS benchmark
 	UNION
 	SELECT 'Rescheduled' AS task_action, 120 AS benchmark
 	UNION
