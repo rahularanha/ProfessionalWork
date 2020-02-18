@@ -1,4 +1,6 @@
-CREATE TEMPORARY TABLE wmrt AS
+
+----- Overall combined query
+
 SELECT fo.order_id,	
 		fo.supplier_city_name AS supplier_city,
 		fo.order_placed_at,
